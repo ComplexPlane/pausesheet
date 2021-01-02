@@ -1,5 +1,4 @@
 // TODO
-// - Fix merge-over-merge bug
 // - Italicize adjustment
 // - Normalize frame numbers / ranges (~ symbol, trailing 0)
 
@@ -147,7 +146,7 @@ function setFontStuff(ctx: Context) {
 
     ctx.range.setFontSizes(ctx.fontSizes);
     ctx.range.setFontFamilies(ctx.fontFamilies);
-    ctx.range.setFontStyles(ctx.fontStyles);
+    // ctx.range.setFontStyles(ctx.fontStyles); // TODO intelligently italicize
     ctx.range.setFontWeights(ctx.fontWeights);
     ctx.range.setHorizontalAlignments(ctx.horizontalAlignments);
     ctx.range.setVerticalAlignments(ctx.verticalAlignments);
