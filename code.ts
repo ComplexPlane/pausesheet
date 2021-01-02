@@ -1,4 +1,25 @@
+// TODO
+// - Fix merge-over-merge bug
+// - Italicize adjustment
+// - Normalize frame numbers / ranges (~ symbol, trailing 0)
+// - Maintain hyperlinks
+
 import SS = GoogleAppsScript.Spreadsheet;
+
+const frameRangeRe = /^((\d?\d)\.\d\d)( ?[～\-~] ?((\d?\d\.)?\d\d))?$/g;
+// Group 1 is start frame, group 4 is end frame (if it exists)
+
+/* Test cases:
+55.21
+50.83
+54.30～26
+54.76-75
+54.76~75
+54.30 ～ 26
+54.76 - 75
+54.76 ~ 75
+55.00-54.98
+*/
 
 interface Context {
     range: SS.Range;
@@ -9,28 +30,52 @@ interface Context {
     fontFamilies: any[][];
     fontStyles: any[][];
     fontWeights: any[][];
+    horizontalAlignments: any[][];
+    verticalAlignments: any[][];
+    mergedCells: boolean[][];
 }
 
 function onOpen() {
     const ui = SpreadsheetApp.getUi();
     // Or DocumentApp or FormApp.
     ui.createMenu('Scripts')
-        .addItem('Format Stage Table', 'formatStageTable')
+        .addItem('Format stage table', 'formatStageTable')
         .addToUi();
 }
 
-function genRangeArray(range: SS.Range): any[][] {
+function genRangeArray<T>(range: SS.Range, defaultValue: T): T[][] {
     const arr: any[][] = [];
     for (let row = 1; row <= range.getNumRows(); row++) {
-        arr.push(new Array(range.getNumColumns()));
+        const rowArr: T[] = [];
+        for (let col = 1; col <= range.getNumColumns(); col++) {
+            rowArr.push(defaultValue);
+        }
+        arr.push(rowArr);
     }
     return arr;
+}
+
+function findMergedCells(range: SS.Range): boolean[][] {
+    const mergedRanges = range.getMergedRanges();
+    const bools = genRangeArray(range, false);
+
+    for (let mergedRange of mergedRanges) {
+        for (let absRow = mergedRange.getRow(); absRow <= mergedRange.getLastRow(); absRow++) {
+            for (let absCol = mergedRange.getColumn(); absCol <= mergedRange.getLastColumn(); absCol++) {
+                const row = absRow - range.getRow() + 1;
+                const col = absCol - range.getColumn() + 1;
+                bools[row - 1][col - 1] = true;
+            }
+        }
+    }
+
+    return bools;
 }
 
 function formatStageTable() {
     const sheet = SpreadsheetApp.getActive();
     const range = sheet.getActiveSheet().getActiveRange();
-    const ctx: Context = { 
+    const ctx: Context = {
         range: range,
         values: range.getValues(),
         bgColors: range.getBackgrounds(),
@@ -39,15 +84,21 @@ function formatStageTable() {
         fontFamilies: range.getFontFamilies(),
         fontStyles: range.getFontStyles(),
         fontWeights: range.getFontWeights(),
+        horizontalAlignments: range.getHorizontalAlignments(),
+        verticalAlignments: range.getVerticalAlignments(),
+        mergedCells: findMergedCells(range),
     };
     // After this point, zero additional reads from the sheet are allowed
 
     doMerges(ctx);
     setBgColor(ctx);
     setFontStuff(ctx);
-    // setBorders(range); // TODO optimize
+    setBorders(ctx); // TODO optimize
+    rewriteArrows(ctx);
+    normalizeFrameRanges(ctx);
 
     range.setNumberFormat('@'); // '@' means plain text for some reason...
+    range.setValues(ctx.values);
     // For more info: https://www.blackcj.com/blog/2015/05/18/cell-number-formatting-with-google-apps-script/
 };
 
@@ -56,6 +107,8 @@ function setFontStuff(ctx: Context) {
         for (let col = 0; col < ctx.range.getNumColumns(); col++) {
             ctx.fontColors[row][col] = 'black';
             ctx.fontStyles[row][col] = 'normal'; // TODO adjustment description should be italic
+            ctx.horizontalAlignments[row][col] = 'center';
+            ctx.verticalAlignments[row][col] = 'middle';
 
             if (col == 0) {
                 // Stage name
@@ -85,25 +138,21 @@ function setFontStuff(ctx: Context) {
     ctx.range.setFontFamilies(ctx.fontFamilies);
     ctx.range.setFontStyles(ctx.fontStyles);
     ctx.range.setFontWeights(ctx.fontWeights);
+    ctx.range.setHorizontalAlignments(ctx.horizontalAlignments);
+    ctx.range.setVerticalAlignments(ctx.verticalAlignments);
 }
 
 function setBorders(ctx: Context) {
     // Clear borders initially
     ctx.range.setBorder(false, false, false, false, false, false);
 
-    const nonEmptyCellLocs = [];
     for (let row = 1; row <= ctx.range.getNumRows(); row++) {
         for (let col = 1; col <= ctx.range.getNumColumns(); col++) {
             if (ctx.values[row - 1][col - 1] !== '') {
-                const absRow = row + ctx.range.getRow() - 1;
-                const absCol = col + ctx.range.getColumn() - 1;
-                nonEmptyCellLocs.push(`R${absRow}C${absCol}`);
+                ctx.range.getCell(row, col).setBorder(true, true, true, true, true, true);
             }
         }
     }
-
-    const rangeList = ctx.range.getSheet().getRangeList(nonEmptyCellLocs); // This is slow... should this be done during "read" phase?
-    rangeList.setBorder(true, true, true, true, true, true);
 }
 
 function setBgColor(ctx: Context) {
@@ -131,19 +180,20 @@ function getSubRange(range: SS.Range, row, col, numRows, numCols): SS.Range {
     return range.getSheet().getRange(absRow, absCol, numRows, numCols);
 }
 
-function expandRight(ctx: Context, row: number, col: number): SS.Range {
-    let newCol = col + 1;
-    for (; newCol <= ctx.range.getNumColumns(); newCol++) {
-        if (ctx.values[row - 1][newCol - 1] !== '') break;
+function emptiesRightOfCell(ctx: Context, row: number, col: number): boolean {
+    for (let newCol = col + 1; newCol <= ctx.range.getNumColumns(); newCol++) {
+        if (ctx.values[row - 1][newCol - 1] !== '') return false;
     }
-
-    return getSubRange(ctx.range, row, col, 1, newCol - col);
+    return true;
 }
 
 function expandDown(ctx: Context, row: number, col: number): SS.Range {
     let newRow = row + 1;
     for (; newRow <= ctx.range.getNumRows(); newRow++) {
-        if (ctx.values[newRow - 1][col - 1] !== '') break;
+        // Stop when...
+        if (ctx.values[newRow - 1][col - 1] !== '' // Cell is empty
+        || ctx.mergedCells[newRow - 1][col - 1] // Cell is already part of a merge
+        || emptiesRightOfCell(ctx, newRow, col)) break; // There are no non-empty cells to the right (end of tree)
     }
 
     return getSubRange(ctx.range, row, col, newRow - row, 1);
@@ -151,19 +201,101 @@ function expandDown(ctx: Context, row: number, col: number): SS.Range {
 
 function doMerges(ctx: Context) {
     for (let col = 1; col < ctx.range.getNumColumns(); col++) {
-        const mergeRegion = expandDown(ctx, 1, col);
-        mergeRegion.merge();
+        let row = 1;
+        while (row <= ctx.range.getNumRows()) {
+            const mergeRegion = expandDown(ctx, row, col);
+            mergeRegion.merge();
+            row += mergeRegion.getNumRows();
+        }
     }
+}
 
-    // const values = range.getValues();
+function rewriteArrows(ctx: Context) {
+    for (let row = 1; row <= ctx.range.getNumRows(); row++) {
+        for (let col = 2; col <= ctx.range.getNumColumns(); col += 2) {
+            const text = String(ctx.values[row - 1][col - 1]).toLowerCase();
+            switch (text) {
+                case 'upleft':
+                case 'leftup':
+                case 'ul': {
+                    ctx.values[row - 1][col - 1] = '↖';
+                    break;
+                };
 
-    // for (let col = 1; col <= range.getNumColumns(); col++) {
-    //     let row = 1;
-    //     while (row <= range.getNumRows()) {
-    //         let newRow = findNextDataInCol(values, row, col);
-    //         if (newRow === null) newRow = range.getNumColumns();
+                case 'upright':
+                case 'rightup':
+                case 'ur': {
+                    ctx.values[row - 1][col - 1] = '↗';
+                    break;
+                }
 
-    //         const mergeRange = range.getSheet().getRange(range.getRow() + row - 1, col, row, 1)
-    //     }
-    // }
+                case 'downleft':
+                case 'leftdown':
+                case 'dl': {
+                    ctx.values[row - 1][col - 1] = '↙';
+                    break;
+                }
+
+                case 'downright':
+                case 'rightdown':
+                case 'dr': {
+                    ctx.values[row - 1][col - 1] = '↘';
+                    break;
+                }
+
+                case 'left':
+                case 'l': {
+                    ctx.values[row - 1][col - 1] = '←';
+                    break;
+                }
+
+                case 'right':
+                case 'r': {
+                    ctx.values[row - 1][col - 1] = '→';
+                    break;
+                }
+
+                case 'up':
+                case 'u': {
+                    ctx.values[row - 1][col - 1] = '↑';
+                    break;
+                }
+
+                case 'down':
+                case 'd': {
+                    ctx.values[row - 1][col - 1] = '↓';
+                    break;
+                }
+
+                case 'neutral':
+                case 'n': {
+                    ctx.values[row - 1][col - 1] = 'N';
+                    break;
+                }
+            }
+        }
+    }
+}
+
+function normalizeFrameRanges(ctx: Context) {
+    for (let row = 1; row <= ctx.range.getNumRows(); row++) {
+        for (let col = 3; col <= ctx.range.getNumColumns(); col += 2) {
+            const frameText = String(ctx.values[row - 1][col - 1]);
+            const match = frameRangeRe.exec(frameText);
+            if (match === null) continue;
+
+            Logger.log(match);
+
+            let normalized = '';
+            if (match[3] !== undefined) {
+                // Frame range
+                normalized = `${match[1]}~${match[4]}`;
+            } else {
+                // Single frame
+                normalized = match[1];
+            }
+
+            ctx.values[row - 1][col - 1] = normalized;
+        }
+    }
 }
