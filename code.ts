@@ -2,11 +2,10 @@
 // - Fix merge-over-merge bug
 // - Italicize adjustment
 // - Normalize frame numbers / ranges (~ symbol, trailing 0)
-// - Maintain hyperlinks
 
 import SS = GoogleAppsScript.Spreadsheet;
 
-const frameRangeRe = /^((\d?\d)\.\d\d)( ?[～\-~] ?((\d?\d\.)?\d\d))?$/g;
+const frameRangeRe = /^((\d?\d)\.\d\d)( ?[～\-\~] ?((\d?\d\.)?\d\d))?$/g;
 // Group 1 is start frame, group 4 is end frame (if it exists)
 
 /* Test cases:
@@ -26,7 +25,6 @@ interface Context {
     values: any[][];
     bgColors: any[][];
     fontSizes: any[][];
-    fontColors: any[][];
     fontFamilies: any[][];
     fontStyles: any[][];
     fontWeights: any[][];
@@ -41,6 +39,22 @@ function onOpen() {
     ui.createMenu('Scripts')
         .addItem('Format stage table', 'formatStageTable')
         .addToUi();
+}
+
+// From: https://stackoverflow.com/questions/15673038/how-do-i-copy-a-row-with-both-values-and-formulas-to-an-array
+// needed to preserve hyperlinks
+function getValuesAndFormulas(range: SS.Range): any[][] {
+    const formulas = range.getFormulas();
+    const values = range.getValues();
+    const merge = new Array(formulas.length);
+    for (let i in formulas) {
+        merge[i] = new Array(formulas[i].length);
+        for (let j in formulas[i]) {
+            merge[i][j] = formulas[i][j] !== '' ? formulas[i][j] : values[i][j];
+        }
+    }
+
+    return merge;
 }
 
 function genRangeArray<T>(range: SS.Range, defaultValue: T): T[][] {
@@ -77,10 +91,9 @@ function formatStageTable() {
     const range = sheet.getActiveSheet().getActiveRange();
     const ctx: Context = {
         range: range,
-        values: range.getValues(),
+        values: getValuesAndFormulas(range),
         bgColors: range.getBackgrounds(),
         fontSizes: range.getFontSizes(),
-        fontColors: range.getFontColors(),
         fontFamilies: range.getFontFamilies(),
         fontStyles: range.getFontStyles(),
         fontWeights: range.getFontWeights(),
@@ -93,9 +106,9 @@ function formatStageTable() {
     doMerges(ctx);
     setBgColor(ctx);
     setFontStuff(ctx);
-    setBorders(ctx); // TODO optimize
+    setBorders(ctx);
     rewriteArrows(ctx);
-    normalizeFrameRanges(ctx);
+    // normalizeFrameRanges(ctx); // TODO fix (only works like 2/3 of the time??)
 
     range.setNumberFormat('@'); // '@' means plain text for some reason...
     range.setValues(ctx.values);
@@ -105,7 +118,6 @@ function formatStageTable() {
 function setFontStuff(ctx: Context) {
     for (let row = 0; row < ctx.range.getNumRows(); row++) {
         for (let col = 0; col < ctx.range.getNumColumns(); col++) {
-            ctx.fontColors[row][col] = 'black';
             ctx.fontStyles[row][col] = 'normal'; // TODO adjustment description should be italic
             ctx.horizontalAlignments[row][col] = 'center';
             ctx.verticalAlignments[row][col] = 'middle';
@@ -134,7 +146,6 @@ function setFontStuff(ctx: Context) {
     }
 
     ctx.range.setFontSizes(ctx.fontSizes);
-    ctx.range.setFontColors(ctx.fontColors);
     ctx.range.setFontFamilies(ctx.fontFamilies);
     ctx.range.setFontStyles(ctx.fontStyles);
     ctx.range.setFontWeights(ctx.fontWeights);
@@ -192,8 +203,8 @@ function expandDown(ctx: Context, row: number, col: number): SS.Range {
     for (; newRow <= ctx.range.getNumRows(); newRow++) {
         // Stop when...
         if (ctx.values[newRow - 1][col - 1] !== '' // Cell is empty
-        || ctx.mergedCells[newRow - 1][col - 1] // Cell is already part of a merge
-        || emptiesRightOfCell(ctx, newRow, col)) break; // There are no non-empty cells to the right (end of tree)
+            || ctx.mergedCells[newRow - 1][col - 1] // Cell is already part of a merge
+            || emptiesRightOfCell(ctx, newRow, col)) break; // There are no non-empty cells to the right (end of tree)
     }
 
     return getSubRange(ctx.range, row, col, newRow - row, 1);
@@ -289,10 +300,12 @@ function normalizeFrameRanges(ctx: Context) {
             let normalized = '';
             if (match[3] !== undefined) {
                 // Frame range
-                normalized = `${match[1]}~${match[4]}`;
+                // normalized = `${match[1]}~${match[4]}`;
+                normalized = 'range';
             } else {
                 // Single frame
-                normalized = match[1];
+                // normalized = match[1];
+                normalized = 'single';
             }
 
             ctx.values[row - 1][col - 1] = normalized;
